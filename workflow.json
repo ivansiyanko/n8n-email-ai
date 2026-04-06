@@ -1,0 +1,240 @@
+{
+  "name": "AI Email Classifier & Auto-Responder",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000001",
+      "name": "Check Inbox Every 5 Min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "host": "={{ $env.IMAP_HOST }}",
+        "port": 993,
+        "secure": true,
+        "user": "={{ $env.IMAP_USER }}",
+        "password": "={{ $env.IMAP_PASSWORD }}",
+        "mailbox": "INBOX",
+        "action": "read",
+        "onlyUnseen": true,
+        "format": "simple",
+        "options": {
+          "allowUnauthorizedCerts": false
+        }
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000002",
+      "name": "Fetch Unread Emails",
+      "type": "n8n-nodes-base.imap",
+      "typeVersion": 2,
+      "position": [220, 300],
+      "credentials": {
+        "imap": {
+          "id": "imap_credential_id",
+          "name": "IMAP Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const emails = [];\n\nfor (const item of $input.all()) {\n  const from = item.json.from?.text || item.json.from || 'unknown';\n  const subject = item.json.subject || '(no subject)';\n  const date = item.json.date || new Date().toISOString();\n  const messageId = item.json.messageId || '';\n  const textBody = item.json.text || '';\n  const htmlBody = item.json.html || '';\n\n  let body = textBody;\n  if (!body && htmlBody) {\n    body = htmlBody.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim();\n  }\n\n  const truncatedBody = body.length > 2000 ? body.substring(0, 2000) + '...' : body;\n\n  emails.push({\n    json: {\n      from, subject, date, messageId,\n      bodyFull: body,\n      bodyForClassification: truncatedBody,\n      hasAttachments: item.json.attachments ? item.json.attachments.length > 0 : false\n    }\n  });\n}\n\nreturn emails;"
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000003",
+      "name": "Parse & Prepare Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are an expert email classifier. Analyze the email and return JSON with: category (meeting/support/sales/billing/newsletter/spam/internal/urgent/other), priority (high/medium/low), sentiment (positive/neutral/negative), summary, suggested_action (auto_reply/draft_reply/forward_to_team/flag_for_review/archive), auto_reply_text, draft_reply_text, forward_to, confidence (0-1).",
+              "role": "system"
+            },
+            {
+              "content": "=FROM: {{ $json.from }}\nSUBJECT: {{ $json.subject }}\nDATE: {{ $json.date }}\n\nBODY:\n{{ $json.bodyForClassification }}",
+              "role": "user"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 1000,
+          "responseFormat": "json_object"
+        }
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000004",
+      "name": "AI Classify Email",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [660, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai_credential_id",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = [];\nfor (const item of $input.all()) {\n  let classification;\n  try {\n    const content = item.json.message?.content || JSON.stringify(item.json);\n    classification = typeof content === 'string' ? JSON.parse(content) : content;\n  } catch (e) {\n    classification = { category: 'other', priority: 'medium', sentiment: 'neutral', summary: 'Could not classify', suggested_action: 'flag_for_review', confidence: 0.0 };\n  }\n  const orig = $('Parse & Prepare Email').item(item.index);\n  items.push({ json: { ...orig.json, ...classification, classifiedAt: new Date().toISOString() } });\n}\nreturn items;"
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000005",
+      "name": "Merge Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "documentId": { "__rl": true, "value": "={{ $env.GOOGLE_SHEET_ID }}", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Email Log", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.date }}",
+            "From": "={{ $json.from }}",
+            "Subject": "={{ $json.subject }}",
+            "Category": "={{ $json.category }}",
+            "Priority": "={{ $json.priority }}",
+            "Sentiment": "={{ $json.sentiment }}",
+            "Summary": "={{ $json.summary }}",
+            "Action": "={{ $json.suggested_action }}",
+            "Confidence": "={{ $json.confidence }}"
+          }
+        }
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000006",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1100, 100],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "gsheets_id", "name": "Google Sheets" } }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.suggested_action }}", "rightValue": "auto_reply", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": "Auto Reply" },
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.suggested_action }}", "rightValue": "draft_reply", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": "Draft Reply" },
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.suggested_action }}", "rightValue": "forward_to_team", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": "Forward" },
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.suggested_action }}", "rightValue": "flag_for_review", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": "Flag" },
+            { "conditions": { "conditions": [{ "leftValue": "={{ $json.suggested_action }}", "rightValue": "archive", "operator": { "type": "string", "operation": "equals" } }] }, "renameOutput": "Archive" }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000007",
+      "name": "Route by Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SMTP_FROM }}",
+        "toEmail": "={{ $json.from }}",
+        "subject": "=Re: {{ $json.subject }}",
+        "emailType": "html",
+        "html": "={{ $json.auto_reply_text }}"
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000008",
+      "name": "Send Auto Reply",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1360, 100],
+      "credentials": { "smtp": { "id": "smtp_id", "name": "SMTP" } }
+    },
+    {
+      "parameters": {
+        "channel": "=#email-drafts",
+        "text": "=Draft Reply Needed\nFrom: {{ $json.from }}\nSubject: {{ $json.subject }}\nDraft: {{ $json.draft_reply_text }}"
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000009",
+      "name": "Slack Draft Review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 300],
+      "credentials": { "slackApi": { "id": "slack_id", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "channel": "={{ $json.forward_to === 'support' ? '#support-inbox' : $json.forward_to === 'sales' ? '#sales-inbox' : '#management-inbox' }}",
+        "text": "=Forwarded Email\nFrom: {{ $json.from }}\nSubject: {{ $json.subject }}\nSummary: {{ $json.summary }}"
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000010",
+      "name": "Slack Forward to Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 500],
+      "credentials": { "slackApi": { "id": "slack_id", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "channel": "=#email-review",
+        "text": "=Flagged for Review\nFrom: {{ $json.from }}\nSubject: {{ $json.subject }}\nConfidence: {{ $json.confidence }}"
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000011",
+      "name": "Slack Flag for Review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 700],
+      "credentials": { "slackApi": { "id": "slack_id", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "channel": "=#email-review",
+        "text": "=Archived: {{ $json.subject }}\nFrom: {{ $json.from }} | Category: {{ $json.category }}"
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000012",
+      "name": "Slack Archive Log",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 900],
+      "credentials": { "slackApi": { "id": "slack_id", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "channel": "=#email-review",
+        "text": "=Auto-replied to: {{ $json.subject }}\nFrom: {{ $json.from }}"
+      },
+      "id": "a1b2c3d4-1001-4000-8000-000000000013",
+      "name": "Slack Auto Reply Log",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1580, 100],
+      "credentials": { "slackApi": { "id": "slack_id", "name": "Slack API" } }
+    }
+  ],
+  "connections": {
+    "Check Inbox Every 5 Min": { "main": [[{ "node": "Fetch Unread Emails", "type": "main", "index": 0 }]] },
+    "Fetch Unread Emails": { "main": [[{ "node": "Parse & Prepare Email", "type": "main", "index": 0 }]] },
+    "Parse & Prepare Email": { "main": [[{ "node": "AI Classify Email", "type": "main", "index": 0 }]] },
+    "AI Classify Email": { "main": [[{ "node": "Merge Classification", "type": "main", "index": 0 }]] },
+    "Merge Classification": { "main": [[{ "node": "Log to Google Sheets", "type": "main", "index": 0 }, { "node": "Route by Action", "type": "main", "index": 0 }]] },
+    "Route by Action": { "main": [[{ "node": "Send Auto Reply", "type": "main", "index": 0 }], [{ "node": "Slack Draft Review", "type": "main", "index": 0 }], [{ "node": "Slack Forward to Team", "type": "main", "index": 0 }], [{ "node": "Slack Flag for Review", "type": "main", "index": 0 }], [{ "node": "Slack Archive Log", "type": "main", "index": 0 }]] },
+    "Send Auto Reply": { "main": [[{ "node": "Slack Auto Reply Log", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "email" }, { "name": "ai" }, { "name": "classification" }, { "name": "automation" }, { "name": "gpt-4o" }],
+  "triggerCount": 1,
+  "pinData": {}
+}
